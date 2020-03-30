@@ -10,7 +10,9 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"os/user"
 	"path"
+	"strings"
 	"time"
 
 	homedir "github.com/mitchellh/go-homedir"
@@ -42,12 +44,16 @@ func main() {
 
 // Execute is where we actually do our work
 func Execute() error {
+	log.Println("Starting bingdaily run")
+
 	hd, err := homedir.Dir()
 	if err != nil {
 		return fmt.Errorf("failed to locate homedir: %w", err)
 	}
 
 	targetDir := path.Join(hd, imgDir)
+
+	log.Printf("Attempt to create output directory: %s\n", targetDir)
 
 	err = os.MkdirAll(targetDir, 0755)
 	if err != nil {
@@ -59,10 +65,14 @@ func Execute() error {
 		return fmt.Errorf("failed to obtain metadata: %w", err)
 	}
 
+	log.Printf("Obtained image metadata: %v\n", im)
+
 	imageName, err := downloadImage(targetDir, im)
 	if err != nil {
 		return fmt.Errorf("failed to download image: %w", err)
 	}
+
+	log.Printf("Setting background image to: %s\n", imageName)
 
 	err = setWallpaper(imageName)
 	if err != nil {
@@ -124,15 +134,57 @@ func downloadImage(imageDir string, im *imageMetadata) (string, error) {
 }
 
 func setWallpaper(filename string) error {
+	dbusAddress, err := obtainDbusAddress()
+	if err != nil {
+		return fmt.Errorf("Failed to obtain dbus address: %w", err)
+	}
+
 	fullFilename := "file://" + filename
+
+	log.Printf("Full filename: %s\n", fullFilename)
+
 	cmd := exec.Command("gsettings", "set", "org.gnome.desktop.background", "picture-uri", fullFilename)
-	cmd.Env = os.Environ() // ensure we forward the environment to the new shell
+
+	env := os.Environ()
+	env = append(env, dbusAddress[:len(dbusAddress)-1])
+	cmd.Env = env // ensure we forward the environment to the new shell including the dbus address
+
 	var out bytes.Buffer
 	cmd.Stdout = &out
 	cmd.Stderr = &out
-	err := cmd.Run()
+	err = cmd.Run()
 	if err != nil {
 		return fmt.Errorf("failed to set wallpaper: %w\n%s", err, out.String())
 	}
 	return nil
+}
+
+func obtainDbusAddress() (string, error) {
+	currentUser, err := user.Current()
+	if err != nil {
+		return "", fmt.Errorf("Failed to obtain current user: %v", err)
+	}
+
+	var out bytes.Buffer
+
+	cmd := exec.Command("pgrep", "--euid", currentUser.Uid, "gnome-session")
+	cmd.Stdout = &out
+
+	err = cmd.Run()
+	if err != nil {
+		return "", fmt.Errorf("Failed to obtain gnome-session PID: %v", err)
+	}
+
+	pid := strings.TrimSpace(out.String())
+	out.Reset()
+
+	cmd = exec.Command("grep", "-z", "DBUS_SESSION_BUS_ADDRESS", fmt.Sprintf("/proc/%s/environ", pid))
+	cmd.Stdout = &out
+
+	err = cmd.Run()
+	if err != nil {
+		return "", fmt.Errorf("Failed to obtain dbus address: %v", err)
+	}
+
+	return out.String(), nil
 }
